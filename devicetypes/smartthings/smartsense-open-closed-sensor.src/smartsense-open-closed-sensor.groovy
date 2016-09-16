@@ -16,7 +16,7 @@
 import physicalgraph.zigbee.clusters.iaszone.ZoneStatus
 
 metadata {
-	definition (name: "SmartSense Open/Closed Sensor", namespace: "smartthings", author: "SmartThings", category: "C2") {
+	definition (name: "SmartSense Open/Closed Sensor (binding table)", namespace: "smartthings", author: "SmartThings", category: "C2") {
 		capability "Battery"
 		capability "Configuration"
 		capability "Contact Sensor"
@@ -31,7 +31,12 @@ metadata {
 		fingerprint inClusters: "0000,0001,0003,0402,0500,0020,0B05", outClusters: "0019", manufacturer: "CentraLite", model: "3300-S"
 		fingerprint inClusters: "0000,0001,0003,0402,0500,0020,0B05", outClusters: "0019", manufacturer: "CentraLite", model: "3300"
 		fingerprint inClusters: "0000,0001,0003,0020,0402,0500,0B05", outClusters: "0019", manufacturer: "CentraLite", model: "3320-L", deviceJoinName: "Iris Contact Sensor"
-	}
+
+        attribute "bindingTableEntry1", "string"
+        attribute "bindingTableEntry2", "string"
+        attribute "bindingTableEntry3", "string"
+
+  }
 
 	simulator {
 
@@ -78,22 +83,22 @@ metadata {
 def parse(String description) {
 	log.debug "description: $description"
 
-	Map map = [:]
+	def result
 	if (description?.startsWith('catchall:')) {
-		map = parseCatchAllMessage(description)
+		result = parseCatchAllMessage(description)
 	}
 	else if (description?.startsWith('read attr -')) {
-		map = parseReportAttributeMessage(description)
+		result = [parseReportAttributeMessage(description)]
 	}
 	else if (description?.startsWith('temperature: ')) {
-		map = parseCustomMessage(description)
+		result = [parseCustomMessage(description)]
 	}
-    else if (description?.startsWith('zone status')) {
-    	map = parseIasMessage(description)
-    }
+	else if (description?.startsWith('zone status')) {
+		result = [parseIasMessage(description)]
+	}
 
 	log.debug "Parse returned $map"
-	def result = map ? createEvent(map) : null
+	result = (result.findAll { it }).collect { createEvent(it) }
 
     if (description?.startsWith('enroll request')) {
     	List cmds = enrollResponse()
@@ -103,13 +108,13 @@ def parse(String description) {
     return result
 }
 
-private Map parseCatchAllMessage(String description) {
-    Map resultMap = [:]
+private List<Map> parseCatchAllMessage(String description) {
+    List<Map> resultMap = []
     def cluster = zigbee.parse(description)
     if (shouldProcessMessage(cluster)) {
         switch(cluster.clusterId) {
             case 0x0001:
-            	resultMap = getBatteryResult(cluster.data.last())
+            	resultMap = [getBatteryResult(cluster.data.last())]
                 break
 
             case 0x0402:
@@ -117,12 +122,77 @@ private Map parseCatchAllMessage(String description) {
                 // temp is last 2 data values. reverse to swap endian
                 String temp = cluster.data[-2..-1].reverse().collect { cluster.hex1(it) }.join()
                 def value = getTemperature(temp)
-                resultMap = getTemperatureResult(value)
+                resultMap = [getTemperatureResult(value)]
                 break
+			case 0x8033:
+				def header_field_lengths = ["transactionSeqNo": 1, "status": 1, "numTableEntries": 1, "startIndex": 1]
+				def field_values = [:]
+				def data = cluster.data
+				header_field_lengths.each { k, v ->
+					field_values[k] = "0x" + byteListToString(data.take(v));
+					data = data.drop(v);
+				}
+				def numEntriesReturned = data.take(1)[0]
+				data = data.drop(1)
+				field_values["numEntriesReturned"] = sprintf("0x%02X", numEntriesReturned)
+				field_values["table_entries"] = parseBindingTableList(data, numEntriesReturned)
+				resultMap = []
+				field_values["table_entries"].eachWithIndex { val, idx ->
+					resultMap << [name: "bindingTableEntry${idx + 1}", value: "$val"]
+				}
+				break
         }
+
     }
 
     return resultMap
+}
+
+List<Map> parseBindingTableList(data, numEntries) {
+	List<Map> table = []
+	def table_entry_lengths = ["srcAddr": 8, "srcEndpoint": 1, "clusterId": 2]
+	for (def i : 0..(numEntries - 1)) {
+		def entryMap = [:]
+		table_entry_lengths.each { k, v ->
+			entryMap[k] = "0x" + byteListToString(data.take(v))
+			data = data.drop(v)
+		}
+		def destAddrMode = data.take(1)[0]
+		entryMap["dstAddrMode"] = sprintf("0x%02X", destAddrMode)
+		data = data.drop(1)
+
+		switch (destAddrMode) {
+			case 0x01:
+				entryMap["DstAddr"] = "0x" + byteListToString(data.take(2))
+				data = data.drop(2)
+				break
+			case 0x03:
+				entryMap["DstAddr"] = "0x" + byteListToString(data.take(8))
+				data = data.drop(8)
+				entryMap["DstEndpoint"] = "0x" + byteListToString(data.take(1))
+				data = data.drop(1)
+				break
+		}
+		table << entryMap
+	}
+	return table
+}
+
+private String byteListToString(List<Integer> bytes, littleEndian = true) {
+	String tot = ""
+	if (bytes.size() > 0) {
+		for (def i : 0..(bytes.size() - 1)) {
+			if (littleEndian) {
+				tot += sprintf("%02X", bytes[bytes.size() - (i + 1)])
+
+			} else {
+				tot += sprintf("%02X", bytes[i])
+			}
+		}
+		return tot
+	} else {
+		return null
+	}
 }
 
 private boolean shouldProcessMessage(cluster) {
@@ -132,7 +202,7 @@ private boolean shouldProcessMessage(cluster) {
         cluster.command == 0x0B ||
         cluster.command == 0x07 ||
         (cluster.data.size() > 0 && cluster.data.first() == 0x3e)
-    return !ignoredMessage
+    return !ignoredMessage || cluster.clusterId == 0x8033
 }
 
 private int getHumidity(value) {
@@ -254,9 +324,26 @@ def refresh() {
 	return refreshCmds + enrollResponse()
 }
 
+def installed() {
+  unschedule(pollBindingTable)
+  schedule("0 0 0/6 * * ?", pollBindingTable)
+}
+
+def pollBindingTable() {
+  log.warn "running poll of the binding table"
+  sendHubCommand(new physicalgraph.device.HubAction("zdo mgmt-bind 0x${zigbee.deviceNetworkId} 0x00"))
+}
+
+def updated() {
+  unschedule(pollBindingTable)
+  schedule("0 0 0/6 * * ?", pollBindingTable)
+  runIn(60, pollBindingTable)
+}
+
 def configure() {
 	// Device-Watch allows 3 check-in misses from device. 300 seconds x 3 = 15min
 	sendEvent(name: "checkInterval", value: 900, displayed: false, data: [protocol: "zigbee"])
+  runIn(60, pollBindingTable)
 
 	String zigbeeEui = swapEndianHex(device.hub.zigbeeEui)
 	log.debug "Configuring Reporting, IAS CIE, and Bindings."
