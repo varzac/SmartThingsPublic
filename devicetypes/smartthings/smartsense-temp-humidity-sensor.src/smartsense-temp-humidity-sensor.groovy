@@ -204,28 +204,36 @@ def getTemperature(value) {
 }
 
 private Map getBatteryResult(rawValue) {
-	log.debug 'Battery'
-	def linkText = getLinkText(device)
+	log.debug "Battery rawValue = ${rawValue}"
 
-    def result = [
-    	name: 'battery'
-    ]
+	def result = [
+			name: 'battery',
+			value: '--',
+			translatable: true
+	]
 
-	def volts = rawValue / 10
-	def descriptionText
-    if (rawValue == 0 || rawValue == 255) {}
-    else if (volts > 3.5) {
-		result.descriptionText = "${linkText} battery has too much power (${volts} volts)."
-	}
+
+	if (rawValue == 0 || rawValue == 255) {}
 	else {
-		def minVolts = 2.1
-    	def maxVolts = 3.0
-		def pct = (volts - minVolts) / (maxVolts - minVolts)
-		def roundedPct = Math.round(pct * 100)
-	    if (roundedPct <= 0)
-		    roundedPct = 1
-		result.value = Math.min(100, roundedPct)
-		result.descriptionText = "${linkText} battery was ${result.value}%"
+		if (volts > 35) {
+			result.descriptionText = "{{ device.displayName }} battery has too much power: (> 3.5) volts."
+		}
+		else {
+			def volts = rawValue
+			def batteryMap = [30:100, 29:75, 28:50, 27:25, 26:21, 25:17, 24:13, 23:8,
+							  22:4, 21:0]
+			def minVolts = 21
+			def maxVolts = 30
+			if (volts < minVolts)
+				volts = minVolts
+			else if (volts > maxVolts)
+				volts = maxVolts
+			def pct = batteryMap[volts]
+			if (pct != null) {
+				result.value = pct
+				result.descriptionText = "{{ device.displayName }} battery was {{ value }}%"
+			}
+		}
 	}
 
 	return result
